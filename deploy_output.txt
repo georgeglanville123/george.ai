@@ -1,0 +1,15 @@
+Building using Buildpacks and deploying container to Cloud Run service [[1mnews-hello[m] in project [[1mactive-chimera-466815-p7[m] region [[1meurope-west2[m]
+Building and deploying...
+Uploading sources.......INFO: Not using ignore file.
+Creating temporary archive of 4 file(s) totalling 7.5 KiB before compression.
+Uploading zipfile of [.] to [gs://run-sources-active-chimera-466815-p7-europe-west2/services/news-hello/1753356305.701354-a85db2d8da824368918ea0f92d2ce77b.zip]
+INFO: Uploading [/tmp/tmpdh10pgwt/file.zip] to [run-sources-active-chimera-466815-p7-europe-west2/services/news-hello/1753356305.701354-a85db2d8da824368918ea0f92d2ce77b.zip]
+.done
+Building Container...................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................done
+Setting IAM Policy..............done
+Creating Revision.......................................................................................................................................................................................done
+Routing traffic.....done
+Done.
+Service [[1mnews-hello[m] revision [[1mnews-hello-00005-fmg[m] has been deployed and is serving [1m100[m percent of traffic.
+Service URL: [1mhttps://news-hello-1004421460102.europe-west2.run.app[m
+INFO: Display format: "none"
