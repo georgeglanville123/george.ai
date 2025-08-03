@@ -9,7 +9,6 @@ from typing import List, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
 
-
 import httpx
 import trafilatura
 import google.generativeai as genai
