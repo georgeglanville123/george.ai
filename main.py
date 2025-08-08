@@ -226,24 +226,24 @@ def llm_extract_structured(items: list, gemini_key: str,
     return rows, errors
 
 # ------------------ Google Sheets Setup ------------------
+
 # ------------------ Google Sheets Setup ------------------
-import google.auth        # add at top if not already
-from google.oauth2.service_account import Credentials
+import google.auth
 from google.auth import default as adc_default
+from google.oauth2.service_account import Credentials
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 if sa_path:
-    # local / CI key-file flow
+    # Running locally or in CI with a key file
     creds = Credentials.from_service_account_file(sa_path, scopes=SCOPES)
 else:
-    # on GCP (Cloud Run), use Application Default Credentials
+    # Running on Cloud Run: use Application Default Credentials
     creds, _ = adc_default(scopes=SCOPES)
 
 gs_client = gspread.authorize(creds)
 
-# Replace with your actual spreadsheet ID:
 SPREADSHEET_ID = "1YRIXgBdft3PaJJrOLVjWudPTUXk8jfljNq7EkWtGtCY"
 # And the name of the worksheet/tab you want to write to:
 WORKSHEET_NAME = "NewsData"
