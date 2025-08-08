@@ -1,0 +1,24 @@
+# cloudbuild.yaml
+serviceAccount: news-runner@active-chimera-466815-p7.iam.gserviceaccount.com
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'build',
+        '-f', 'Dockerfile',
+        '-t', 'gcr.io/$PROJECT_ID/news-collector:latest',
+        '.'
+      ]
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'push',
+        'gcr.io/$PROJECT_ID/news-collector:latest'
+      ]
+
+images:
+  - 'gcr.io/$PROJECT_ID/news-collector:latest'
