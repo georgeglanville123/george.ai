@@ -1,10 +1,12 @@
 # cloudbuild.yaml
+
 serviceAccount: news-runner@active-chimera-466815-p7.iam.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
+  # 1) Build your Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args:
       [
@@ -13,11 +15,25 @@ steps:
         '-t', 'gcr.io/$PROJECT_ID/news-collector:latest',
         '.'
       ]
+
+  # 2) Push it to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       [
         'push',
         'gcr.io/$PROJECT_ID/news-collector:latest'
+      ]
+
+  # 3) Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      [
+        'run', 'deploy', 'news-collector',
+        '--image', 'gcr.io/$PROJECT_ID/news-collector:latest',
+        '--platform', 'managed',
+        '--region', 'europe-west2',
+        '--allow-unauthenticated'
       ]
 
 images:
