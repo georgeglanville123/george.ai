@@ -1,4 +1,4 @@
-#georgeaiiii
+#georgeaiiiyillll
 
 import os
 import json
@@ -226,13 +226,21 @@ def llm_extract_structured(items: list, gemini_key: str,
     return rows, errors
 
 # ------------------ Google Sheets Setup ------------------
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+# ------------------ Google Sheets Setup ------------------
+import google.auth        # add at top if not already
+from google.oauth2.service_account import Credentials
+from google.auth import default as adc_default
 
-creds = Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE,
-    scopes=SCOPES
-)
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+if sa_path:
+    # local / CI key-file flow
+    creds = Credentials.from_service_account_file(sa_path, scopes=SCOPES)
+else:
+    # on GCP (Cloud Run), use Application Default Credentials
+    creds, _ = adc_default(scopes=SCOPES)
+
 gs_client = gspread.authorize(creds)
 
 # Replace with your actual spreadsheet ID:
