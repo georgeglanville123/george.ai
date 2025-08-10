@@ -377,51 +377,58 @@ def append_to_sheet(rows: list):
     logging.info("Appended %d rows to sheet '%s'", len(rows), WORKSHEET_NAME)
 
 # ────────────────────────── Flask Routes ──────────────────────────
-@app.get("/")
-def health():
-    return jsonify({"message": "Alive. POST /run to execute."})
-
 @app.post("/run")
 def run_pipeline():
-    dry_run = request.args.get("dry_run","false").lower()=="true"
-    step    = request.args.get("step","all").lower()
+    dry_run = request.args.get("dry_run", "false").lower() == "true"
+    step = request.args.get("step", "all").lower()
+    debug = request.args.get("debug", "false").lower() == "true"
+    debug_payload = {}
 
-    cse_key    = os.getenv("CSE_API_KEY","MISSING")
-    cse_cx     = os.getenv("CSE_CX","MISSING")
-    gemini_key = os.getenv("GEMINI_API_KEY","MISSING")
+    cse_key = os.getenv("CSE_API_KEY", "MISSING")
+    cse_cx = os.getenv("CSE_CX", "MISSING")
+    gemini_key = os.getenv("GEMINI_API_KEY", "MISSING")
     if "MISSING" in (cse_key, cse_cx):
-        return jsonify({"error":"CSE secrets missing"}), 500
+        return jsonify({"error": "CSE secrets missing"}), 500
 
     # 1) Build & Search
-    queries = build_queries()  # List[Tuple[query, company]]
+    queries = build_queries()
     all_results, seen = [], set()
-    if step in ("all","search","fetch","llm","extract"):
+    if step in ("all", "search", "fetch", "llm", "extract"):
         for q, company in queries:
             if len(seen) >= MAX_TOTAL_RESULTS:
                 break
-            for it in google_cse_search(q, cse_key, cse_cx):  # uses TIME_MODE/TIME_DAYS
+            for it in google_cse_search(q, cse_key, cse_cx):
                 link = it.get("link")
                 if link and link not in seen:
                     seen.add(link)
                     all_results.append({
                         "link": link,
-                        "title": it.get("title",""),
-                        "snippet": it.get("snippet",""),
+                        "title": it.get("title", ""),
+                        "snippet": it.get("snippet", ""),
                         "company": company
                     })
-            time.sleep(0.2 + random.random()*0.3)
+            time.sleep(0.2 + random.random() * 0.3)
+
+    if debug:
+        debug_payload["all_results"] = [
+            {"company": it["company"], "title": it["title"], "link": it["link"]}
+            for it in all_results
+        ]
 
     # 1.5) Rank and pick the best to fetch
     ranked = sorted(
         all_results,
-        key=lambda it: (score_item(it), len(it.get("title",""))),
+        key=lambda it: (score_item(it), len(it.get("title", ""))),
         reverse=True
     )
     candidates = cap_by_domain(ranked, per_domain=2)[:MAX_FETCH]
 
-    # 2) Fetch (use the ranked candidates)
+    if debug:
+        debug_payload["candidates"] = [it["link"] for it in candidates]
+
+    # 2) Fetch
     fetched, fetch_errors = [], []
-    if step in ("all","fetch","llm","extract") and not dry_run:
+    if step in ("all", "fetch", "llm", "extract") and not dry_run:
         client = httpx.Client(timeout=FETCH_TIMEOUT_SEC)
         for it in candidates:
             res = fetch_and_extract(it["link"], client)
@@ -429,34 +436,50 @@ def run_pipeline():
                 fetch_errors.append(res)
             else:
                 it.update({
-                    "extracted_text":  res["text"],
+                    "extracted_text": res["text"],
                     "extracted_title": res["title"],
-                    "extracted_date":  res["date"],
+                    "extracted_date": res["date"],
                 })
                 fetched.append(it)
         client.close()
 
+    if debug:
+        debug_payload["fetched_urls"] = [it["link"] for it in fetched]
+        debug_payload["fetch_errors_detail"] = fetch_errors
+
     # 3) Relevance filter
     relevant, irrelevant, rel_errors = [], [], []
-    if step in ("all","llm","extract") and not dry_run and fetched:
+    if step in ("all", "llm", "extract") and not dry_run and fetched:
         if gemini_key == "MISSING":
-            return jsonify({"error":"GEMINI_API_KEY missing"}), 500
+            return jsonify({"error": "GEMINI_API_KEY missing"}), 500
         relevant, irrelevant, rel_errors = llm_relevance_filter(fetched, gemini_key)
+
+    if debug:
+        debug_payload["relevant_urls"] = [it["link"] for it in relevant]
+        debug_payload["irrelevant_urls"] = [x.get("url") for x in irrelevant]
 
     # 4) Structured extract
     structured, ext_errors = [], []
-    if step in ("all","extract") and not dry_run and relevant:
+    if step in ("all", "extract") and not dry_run and relevant:
         structured, ext_errors = llm_extract_structured(relevant, gemini_key)
+
+    if debug:
+        debug_payload["structured_preview"] = structured
 
     # 5) Append to Google Sheet
     if structured:
+        logging.info(
+            "Writing %d row(s) to Sheets. URLs: %s",
+            len(structured),
+            [row[4] for row in structured]  # row[4] is the URL
+        )
         try:
             append_to_sheet(structured)
         except Exception as e:
             logging.exception("Failed to write to Google Sheet: %s", e)
 
-    # Summary
-    return jsonify({
+    # Summary response
+    resp = {
         "status": "ok",
         "date": today_iso(),
         "dry_run": dry_run,
@@ -472,11 +495,11 @@ def run_pipeline():
         "extract_errors": len(ext_errors),
         "secrets_tail": {
             "cse_key": tail(cse_key),
-            "cse_cx":  tail(cse_cx),
-            "gemini":  tail(gemini_key)
+            "cse_cx": tail(cse_cx),
+            "gemini": tail(gemini_key)
         }
-    }), 200
+    }
+    if debug:
+        resp["debug"] = debug_payload
 
-if __name__ == "__main__":
-    # Handy for local runs: Cloud Run ignores this because you use gunicorn
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=False)
+    return jsonify(resp), 200
