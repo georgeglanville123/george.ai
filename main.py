@@ -272,7 +272,7 @@ def llm_relevance_filter(items: list, gemini_key: str,
         "You are a strict filter for news about telecom operators (CSPs) "
         "using generative AI (GenAI/LLMs) for deployments, pilots, rollouts, or implementations.\n\n"
         "Return ONLY valid JSON in this exact shape:\n"
-        "{\"relevant\": true/false, \"reason\": \"<≤20 words>\"}\n\n"
+        "{{\"relevant\": true/false, \"reason\": \"<≤20 words>\"}}\n\n"
         "Text to review (truncated):\n"
         "\"\"\"{article}\"\"\""
     )
@@ -321,7 +321,7 @@ def llm_extract_structured(items: list, gemini_key: str,
         "- activity: deployment, pilot, rollout, etc.\n"
         "- summary: <=40 words\n\n"
         "Return ONLY valid JSON in this exact shape:\n"
-        "{\"company\":\"…\",\"technology\":\"…\",\"activity\":\"…\",\"summary\":\"…\"}\n\n"
+        "{{\"company\":\"…\",\"technology\":\"…\",\"activity\":\"…\",\"summary\":\"…\"}}\n\n"
         "Text:\n"
         "\"\"\"{article}\"\"\""
     )

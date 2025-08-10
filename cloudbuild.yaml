@@ -1,43 +1,41 @@
 # cloudbuild.yaml
-serviceAccount: news-runner@active-chimera-466815-p7.iam.gserviceaccount.com
 
-substitutions:
-  _SERVICE_NAME: news-collector
-  _REGION: europe-west2
+# Either delete this line and pick the deployer SA in the trigger UI,
+# or set it to your deployer SA (NOT news-runner):
+# serviceAccount: ci-deployer@active-chimera-466815-p7.iam.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
+substitutions:
+  _IMAGE: gcr.io/${PROJECT_ID}/news-collector
+
 steps:
-  # 1) Build your Docker image
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      [
-        'build',
-        '-f', 'Dockerfile',
-        '-t', 'gcr.io/${PROJECT_ID}/${_SERVICE_NAME}:$SHORT_SHA',
-        '.'
-      ]
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'Dockerfile', '-t', '${_IMAGE}:$SHORT_SHA', '.']
 
-  # 2) Push it to Container Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      [
-        'push',
-        'gcr.io/${PROJECT_ID}/${_SERVICE_NAME}:$SHORT_SHA'
-      ]
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_IMAGE}:$SHORT_SHA']
 
-  # 3) Deploy to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  # (optional) also tag/push latest
+  - name: gcr.io/cloud-builders/docker
+    args: ['tag', '${_IMAGE}:$SHORT_SHA', '${_IMAGE}:latest']
+  - name: gcr.io/cloud-builders/docker
+    args: ['push', '${_IMAGE}:latest']
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
       [
-        'run', 'deploy', '${_SERVICE_NAME}',
-        '--image', 'gcr.io/${PROJECT_ID}/${_SERVICE_NAME}:$SHORT_SHA',
-        '--platform', 'managed',
-        '--region', '${_REGION}',
-        '--allow-unauthenticated'
+        'run','deploy','news-collector',
+        '--image','${_IMAGE}:$SHORT_SHA',
+        '--platform','managed',
+        '--region','europe-west2',
+        '--service-account','news-runner@active-chimera-466815-p7.iam.gserviceaccount.com',
+        '--allow-unauthenticated',
+        '--quiet'
       ]
 
 images:
-  - 'gcr.io/${PROJECT_ID}/${_SERVICE_NAME}:$SHORT_SHA'
+  - '${_IMAGE}:$SHORT_SHA'
+  - '${_IMAGE}:latest'
