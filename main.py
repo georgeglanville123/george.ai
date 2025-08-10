@@ -100,6 +100,13 @@ BAD_HINTS = (
 PRESS_PATHS = ("/press", "/news", "/media", "/newsroom")
 DOC_EXTS = (".pdf",".ppt",".pptx",".doc",".docx",".xls",".xlsx")
 
+
+# CSE pacing
+CSE_BASE_DELAY_SEC = float(os.getenv("CSE_BASE_DELAY_SEC", "0.8"))  # sleep between queries
+CSE_MAX_RETRIES    = int(os.getenv("CSE_MAX_RETRIES", "6"))         # per-query retries on 429/503
+CSE_BACKOFF_FACTOR = float(os.getenv("CSE_BACKOFF_FACTOR", "1.8"))  # exponential backoff multiplier
+
+
 # ────────────────────────── Helpers ──────────────────────────
 def tail(v: str) -> str:
     return v[-6:] if v and v != "MISSING" else "MISSING"
@@ -166,14 +173,6 @@ def cap_by_domain(items, per_domain=2):
     return out
 
 # ───────────────────── Google CSE Search ─────────────────────
-def build_queries() -> List[Tuple[str, str]]:
-    g = TERM_GROUPS[0]
-    ai_clause  = "(" + " OR ".join(g["ai"])  + ")"
-    act_clause = "(" + " OR ".join(g["act"]) + ")"
-    return [
-        (f'{ai_clause} AND {act_clause} AND "{company}"', company)
-        for company in COMPANIES
-    ]
 
 def google_cse_search(query: str, api_key: str, cx: str,
                       mode: str = TIME_MODE, days: int = TIME_DAYS) -> list:
@@ -185,25 +184,55 @@ def google_cse_search(query: str, api_key: str, cx: str,
     }
 
     if mode == "calendar":
-        # Previous N full calendar days (excluding today) in Europe/London
         ldn = ZoneInfo(TIME_ZONE)
         today_ldn = datetime.now(ldn).date()
-        end = today_ldn - timedelta(days=1)          # yesterday
-        start = end - timedelta(days=days - 1)       # go back N-1 days
+        end = today_ldn - timedelta(days=1)
+        start = end - timedelta(days=days - 1)
         params["sort"] = f"date:r:{start:%Y%m%d}:{end:%Y%m%d}"
-        logging.info("CSE calendar window: %s → %s", start.isoformat(), end.isoformat())
     else:
-        # Rolling window (e.g., last 2 days ≈ 48h)
         params["dateRestrict"] = f"d{days}"
-        logging.info("CSE rolling window: last %d day(s)", days)
 
-    with httpx.Client(timeout=CSE_TIMEOUT_SEC) as client:
-        resp = client.get("https://www.googleapis.com/customsearch/v1", params=params)
-        if resp.status_code == 429:
-            time.sleep(1 + random.random())
-            resp = client.get("https://www.googleapis.com/customsearch/v1", params=params)
-        resp.raise_for_status()
-        return resp.json().get("items", []) or []
+    delay = CSE_BASE_DELAY_SEC
+    for attempt in range(1, CSE_MAX_RETRIES + 1):
+        try:
+            # NOTE: keep a separate client here for simplicity; you can reuse one if you prefer
+            with httpx.Client(timeout=CSE_TIMEOUT_SEC) as client:
+                resp = client.get("https://www.googleapis.com/customsearch/v1", params=params)
+            if resp.status_code in (429, 503):
+                # Respect Retry-After if present
+                ra = resp.headers.get("retry-after")
+                wait = float(ra) if ra and ra.isdigit() else delay
+                logging.warning("CSE %s on attempt %d. Waiting %.2fs. URL=%s",
+                                resp.status_code, attempt, wait, resp.request.url)
+                time.sleep(wait)
+                delay *= CSE_BACKOFF_FACTOR  # exponential backoff
+                continue
+
+            # Handle quota errors gracefully (403 daily/user rate limit, etc.)
+            if resp.status_code == 403:
+                try:
+                    payload = resp.json()
+                    reason = payload.get("error", {}).get("errors", [{}])[0].get("reason")
+                except Exception:
+                    reason = "forbidden"
+                logging.error("CSE 403 (%s). Aborting this query. URL=%s", reason, resp.request.url)
+                return []  # skip this query, keep pipeline going
+
+            resp.raise_for_status()
+            return resp.json().get("items", []) or []
+
+        except httpx.HTTPStatusError as e:
+            logging.error("CSE HTTP error on attempt %d: %s", attempt, e)
+            time.sleep(delay)
+            delay *= CSE_BACKOFF_FACTOR
+        except Exception as e:
+            logging.error("CSE transport error on attempt %d: %s", attempt, e)
+            time.sleep(delay)
+            delay *= CSE_BACKOFF_FACTOR
+
+    logging.error("CSE failed after %d attempts for query: %s", CSE_MAX_RETRIES, query)
+    return []
+
 
 # ───────────────────── Fetch & Extract ─────────────────────
 def fetch_and_extract(url: str, client: httpx.Client,
@@ -407,7 +436,7 @@ def run_pipeline():
                         "snippet": it.get("snippet", ""),
                         "company": company
                     })
-            time.sleep(0.2 + random.random() * 0.3)
+            time.sleep(CSE_BASE_DELAY_SEC + random.random()*0.3)
 
     if debug:
         debug_payload["all_results"] = [
