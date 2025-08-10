@@ -1,5 +1,3 @@
-#AI
-
 import os
 import json
 import time
@@ -15,7 +13,6 @@ import trafilatura
 import google.generativeai as genai
 from flask import Flask, jsonify, request
 from urllib.parse import urlparse
-import google.auth
 from google.auth import default as adc_default
 from zoneinfo import ZoneInfo
 
@@ -62,18 +59,24 @@ COMPANIES = [
 ]
 
 BINARY_EXTS = (".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx")
+DOC_EXTS = BINARY_EXTS
 
-MAX_RESULTS_PER_QUERY = 1    # ← only 1 result per company
+MAX_RESULTS_PER_QUERY = 1
 MAX_TOTAL_RESULTS     = 170
 MAX_FETCH             = 25
 CSE_TIMEOUT_SEC       = 30.0
 FETCH_TIMEOUT_SEC     = 20.0
 GEMINI_MODEL          = "gemini-1.5-flash"
 
-# Time filtering knobs (adjust via env or edit here)
+# Time filtering knobs
 TIME_MODE = os.getenv("TIME_MODE", "calendar")  # "calendar" or "rolling"
 TIME_DAYS = int(os.getenv("TIME_DAYS", "1"))    # N-day window
-TIME_ZONE = "Europe/London"                     # for calendar mode
+TIME_ZONE = "Europe/London"                     # used for calendar mode
+
+# CSE pacing
+CSE_BASE_DELAY_SEC = float(os.getenv("CSE_BASE_DELAY_SEC", "1.0"))
+CSE_MAX_RETRIES    = int(os.getenv("CSE_MAX_RETRIES", "6"))
+CSE_BACKOFF_FACTOR = float(os.getenv("CSE_BACKOFF_FACTOR", "1.8"))
 
 DEBUG_MODE = os.getenv("DEBUG", "0") == "1"
 logging.basicConfig(
@@ -90,22 +93,12 @@ ACTION_VERBS = (
     "announce","launch","pilot","rollout","roll-out","implement",
     "deploy","deployment","go-live","trial","proof of concept","poc"
 )
-
 BAD_HINTS = (
     "job","hiring","career","vacancy","investor","ir","earnings",
     "q1","q2","q3","q4","whitepaper","webinar","rfp","tender",
     "brochure","datasheet"
 )
-
 PRESS_PATHS = ("/press", "/news", "/media", "/newsroom")
-DOC_EXTS = (".pdf",".ppt",".pptx",".doc",".docx",".xls",".xlsx")
-
-
-# CSE pacing
-CSE_BASE_DELAY_SEC = float(os.getenv("CSE_BASE_DELAY_SEC", "0.8"))  # sleep between queries
-CSE_MAX_RETRIES    = int(os.getenv("CSE_MAX_RETRIES", "6"))         # per-query retries on 429/503
-CSE_BACKOFF_FACTOR = float(os.getenv("CSE_BACKOFF_FACTOR", "1.8"))  # exponential backoff multiplier
-
 
 # ────────────────────────── Helpers ──────────────────────────
 def tail(v: str) -> str:
@@ -128,7 +121,6 @@ def _has_any(text: str, terms) -> bool:
     return any(re.search(r"\b" + re.escape(term) + r"\b", t, re.I) for term in terms)
 
 def score_item(it: dict) -> int:
-    """Score a CSE item using title/snippet/url + company in it['company']."""
     title   = (it.get("title") or "")
     snippet = (it.get("snippet") or "")
     url     = (it.get("link")  or "")
@@ -138,32 +130,26 @@ def score_item(it: dict) -> int:
     host = urlparse(url).netloc.lower()
 
     score = 0
-    # Company mention (title > snippet)
     if _has_any(title, [company]):      score += 3
     elif _has_any(snippet, [company]):  score += 1
 
-    # AI + Activity signals (title weighted more than snippet)
     if _has_any(title, AI_HINTS):       score += 3
     if _has_any(title, ACT_HINTS):      score += 3
     if _has_any(snippet, AI_HINTS):     score += 1
     if _has_any(snippet, ACT_HINTS):    score += 1
 
-    # Action verbs (deploy/pilot/etc.)
     if _has_any(title, ACTION_VERBS):   score += 2
     if _has_any(snippet, ACTION_VERBS): score += 1
 
-    # “Newsroom/press” path hint
     if any(p in path for p in PRESS_PATHS): score += 1
 
-    # Penalties: downloads / junky intents / aggregator copies
     if path.endswith(DOC_EXTS):                      score -= 3
     if _has_any(title, BAD_HINTS) or _has_any(snippet, BAD_HINTS): score -= 3
-    if host in ("news.google.com","news.yahoo.com"): score -= 2  # optional diversity
+    if host in ("news.google.com","news.yahoo.com"): score -= 2
 
     return score
 
 def cap_by_domain(items, per_domain=2):
-    """Keep at most N items per hostname to avoid near-duplicates."""
     counts, out = {}, []
     for it in items:
         d = urlparse(it["link"]).netloc.lower()
@@ -172,8 +158,17 @@ def cap_by_domain(items, per_domain=2):
             counts[d] = counts.get(d, 0) + 1
     return out
 
-# ───────────────────── Google CSE Search ─────────────────────
+# ───────────────────── Query Builder ─────────────────────
+def build_queries() -> List[Tuple[str, str]]:
+    g = TERM_GROUPS[0]
+    ai_clause  = "(" + " OR ".join(g["ai"])  + ")"
+    act_clause = "(" + " OR ".join(g["act"]) + ")"
+    return [
+        (f'{ai_clause} AND {act_clause} AND "{company}"', company)
+        for company in COMPANIES
+    ]
 
+# ───────────────────── Google CSE Search ─────────────────────
 def google_cse_search(query: str, api_key: str, cx: str,
                       mode: str = TIME_MODE, days: int = TIME_DAYS) -> list:
     params = {
@@ -195,28 +190,26 @@ def google_cse_search(query: str, api_key: str, cx: str,
     delay = CSE_BASE_DELAY_SEC
     for attempt in range(1, CSE_MAX_RETRIES + 1):
         try:
-            # NOTE: keep a separate client here for simplicity; you can reuse one if you prefer
             with httpx.Client(timeout=CSE_TIMEOUT_SEC) as client:
                 resp = client.get("https://www.googleapis.com/customsearch/v1", params=params)
+
             if resp.status_code in (429, 503):
-                # Respect Retry-After if present
                 ra = resp.headers.get("retry-after")
                 wait = float(ra) if ra and ra.isdigit() else delay
                 logging.warning("CSE %s on attempt %d. Waiting %.2fs. URL=%s",
                                 resp.status_code, attempt, wait, resp.request.url)
                 time.sleep(wait)
-                delay *= CSE_BACKOFF_FACTOR  # exponential backoff
+                delay *= CSE_BACKOFF_FACTOR
                 continue
 
-            # Handle quota errors gracefully (403 daily/user rate limit, etc.)
             if resp.status_code == 403:
                 try:
                     payload = resp.json()
                     reason = payload.get("error", {}).get("errors", [{}])[0].get("reason")
                 except Exception:
                     reason = "forbidden"
-                logging.error("CSE 403 (%s). Aborting this query. URL=%s", reason, resp.request.url)
-                return []  # skip this query, keep pipeline going
+                logging.error("CSE 403 (%s). Skipping query. URL=%s", reason, resp.request.url)
+                return []
 
             resp.raise_for_status()
             return resp.json().get("items", []) or []
@@ -233,15 +226,12 @@ def google_cse_search(query: str, api_key: str, cx: str,
     logging.error("CSE failed after %d attempts for query: %s", CSE_MAX_RETRIES, query)
     return []
 
-
 # ───────────────────── Fetch & Extract ─────────────────────
 def fetch_and_extract(url: str, client: httpx.Client,
                       timeout: float = FETCH_TIMEOUT_SEC) -> dict:
-    # 1) Skip obvious non-HTML files by extension (no request needed)
     if url.lower().endswith(BINARY_EXTS):
         return {"url": url, "text": None, "title": None, "date": None, "error": "skipped_binary"}
 
-    # 2) Fetch the page; bail if not HTML
     try:
         r = client.get(url, timeout=timeout, follow_redirects=True)
         r.raise_for_status()
@@ -252,7 +242,6 @@ def fetch_and_extract(url: str, client: httpx.Client,
     if "text/html" not in ctype and "application/xhtml" not in ctype:
         return {"url": url, "text": None, "title": None, "date": None, "error": f"non_html:{ctype}"}
 
-    # 3) Extract main content
     extracted = trafilatura.extract(
         r.text,
         include_comments=False,
@@ -269,13 +258,8 @@ def fetch_and_extract(url: str, client: httpx.Client,
     except Exception as e:
         return {"url": url, "text": None, "title": None, "date": None, "error": f"parse_json:{e}"}
 
-    return {
-        "url":   url,
-        "text":  data.get("text"),
-        "title": data.get("title"),
-        "date":  data.get("date"),
-        "error": None,
-    }
+    return {"url": url, "text": data.get("text"), "title": data.get("title"),
+            "date": data.get("date"), "error": None}
 
 # ─────────────────── LLM Relevance Filter ───────────────────
 def gemini_generate_with_backoff(model, prompt: str, config: dict, max_tries: int = 5):
@@ -326,11 +310,12 @@ def llm_relevance_filter(items: list, gemini_key: str,
 
         raw = getattr(resp, "text", "").strip()
         data = safe_json_extract(raw)
-        if data.get("relevant"):
+        if isinstance(data, dict) and data.get("relevant") is True:
             it["relevance_reason"] = data.get("reason", "")
             relevant.append(it)
         else:
-            irrelevant.append({"url": it["link"], "reason": data.get("reason", "not relevant")})
+            reason = data.get("reason", "not relevant") if isinstance(data, dict) else "bad JSON"
+            irrelevant.append({"url": it["link"], "reason": reason})
 
         time.sleep(0.3 + random.random()*0.2)
 
@@ -371,10 +356,10 @@ def llm_extract_structured(items: list, gemini_key: str,
 
         raw = getattr(resp, "text", "").strip()
         data = safe_json_extract(raw)
-        if all(k in data for k in ("company","technology","activity","summary")):
+        if isinstance(data, dict) and all(k in data for k in ("company","technology","activity","summary")):
             rows.append([
                 data["company"], data["technology"], data["activity"], data["summary"],
-                it["link"], it["extracted_date"] or today_iso()
+                it["link"], it.get("extracted_date") or today_iso()
             ])
         else:
             errors.append({"url": it["link"], "raw": raw})
@@ -388,10 +373,8 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 if sa_path:
-    # Running locally or in CI with a key file
     creds = Credentials.from_service_account_file(sa_path, scopes=SCOPES)
 else:
-    # Running on Cloud Run: use Application Default Credentials
     creds, _ = adc_default(scopes=SCOPES)
 
 gs_client = gspread.authorize(creds)
@@ -406,6 +389,10 @@ def append_to_sheet(rows: list):
     logging.info("Appended %d rows to sheet '%s'", len(rows), WORKSHEET_NAME)
 
 # ────────────────────────── Flask Routes ──────────────────────────
+@app.get("/")
+def health():
+    return jsonify({"message": "Alive. POST /run to execute."})
+
 @app.post("/run")
 def run_pipeline():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
@@ -423,7 +410,7 @@ def run_pipeline():
     queries = build_queries()
     all_results, seen = [], set()
     if step in ("all", "search", "fetch", "llm", "extract"):
-        for q, company in queries:
+        for q, company in random.sample(queries, k=len(queries)):  # randomize to spread throttle
             if len(seen) >= MAX_TOTAL_RESULTS:
                 break
             for it in google_cse_search(q, cse_key, cse_cx):
@@ -500,7 +487,7 @@ def run_pipeline():
         logging.info(
             "Writing %d row(s) to Sheets. URLs: %s",
             len(structured),
-            [row[4] for row in structured]  # row[4] is the URL
+            [row[4] for row in structured]
         )
         try:
             append_to_sheet(structured)
@@ -532,3 +519,6 @@ def run_pipeline():
         resp["debug"] = debug_payload
 
     return jsonify(resp), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=False)
