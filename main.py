@@ -4,7 +4,7 @@ import time
 import random
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
@@ -15,6 +15,7 @@ from flask import Flask, jsonify, request
 from urllib.parse import urlparse
 import google.auth
 from google.auth import default as adc_default
+from zoneinfo import ZoneInfo
 
 # ────────────────────────── Config ──────────────────────────
 TERM_GROUPS = [{
@@ -22,6 +23,7 @@ TERM_GROUPS = [{
     "act": ["deployment", "implementation", "pilot", "rollout"]
 }]
 
+# Refined list (170)
 COMPANIES = [
     "1&1 Drillisch", "2degrees", "4iG", "AIS", "Almadar Aljaded (Al Madar)", "Altibox",
     "Altice", "Altice USA", "America Movil", "AT&T", "AXIAN Telecom", "Axiata", "Batelco",
@@ -60,11 +62,16 @@ COMPANIES = [
 BINARY_EXTS = (".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx")
 
 MAX_RESULTS_PER_QUERY = 1    # ← only 1 result per company
-MAX_TOTAL_RESULTS     = 100
-MAX_FETCH             = 10
+MAX_TOTAL_RESULTS     = 170
+MAX_FETCH             = 25
 CSE_TIMEOUT_SEC       = 30.0
 FETCH_TIMEOUT_SEC     = 20.0
 GEMINI_MODEL          = "gemini-1.5-flash"
+
+# Time filtering knobs (adjust via env or edit here)
+TIME_MODE = os.getenv("TIME_MODE", "calendar")  # "calendar" or "rolling"
+TIME_DAYS = int(os.getenv("TIME_DAYS", "1"))    # N-day window
+TIME_ZONE = "Europe/London"                     # for calendar mode
 
 DEBUG_MODE = os.getenv("DEBUG", "0") == "1"
 logging.basicConfig(
@@ -167,14 +174,27 @@ def build_queries() -> List[Tuple[str, str]]:
     ]
 
 def google_cse_search(query: str, api_key: str, cx: str,
-                      date_restrict_days: int = 7) -> list:
+                      mode: str = TIME_MODE, days: int = TIME_DAYS) -> list:
     params = {
         "key": api_key,
         "cx": cx,
         "q": query,
         "num": MAX_RESULTS_PER_QUERY,
-        "dateRestrict": f"d{date_restrict_days}"
     }
+
+    if mode == "calendar":
+        # Previous N full calendar days (excluding today) in Europe/London
+        ldn = ZoneInfo(TIME_ZONE)
+        today_ldn = datetime.now(ldn).date()
+        end = today_ldn - timedelta(days=1)          # yesterday
+        start = end - timedelta(days=days - 1)       # go back N-1 days
+        params["sort"] = f"date:r:{start:%Y%m%d}:{end:%Y%m%d}"
+        logging.info("CSE calendar window: %s → %s", start.isoformat(), end.isoformat())
+    else:
+        # Rolling window (e.g., last 2 days ≈ 48h)
+        params["dateRestrict"] = f"d{days}"
+        logging.info("CSE rolling window: last %d day(s)", days)
+
     with httpx.Client(timeout=CSE_TIMEOUT_SEC) as client:
         resp = client.get("https://www.googleapis.com/customsearch/v1", params=params)
         if resp.status_code == 429:
@@ -250,7 +270,7 @@ def llm_relevance_filter(items: list, gemini_key: str,
         "You are a strict filter for news about telecom operators (CSPs) "
         "using generative AI (GenAI/LLMs) for deployments, pilots, rollouts, or implementations.\n\n"
         "Return ONLY valid JSON in this exact shape:\n"
-        "{{\"relevant\": true/false, \"reason\": \"<≤20 words>\"}}\n\n"
+        "{\"relevant\": true/false, \"reason\": \"<≤20 words>\"}\n\n"
         "Text to review (truncated):\n"
         "\"\"\"{article}\"\"\""
     )
@@ -299,7 +319,7 @@ def llm_extract_structured(items: list, gemini_key: str,
         "- activity: deployment, pilot, rollout, etc.\n"
         "- summary: <=40 words\n\n"
         "Return ONLY valid JSON in this exact shape:\n"
-        "{{\"company\":\"…\",\"technology\":\"…\",\"activity\":\"…\",\"summary\":\"…\"}}\n\n"
+        "{\"company\":\"…\",\"technology\":\"…\",\"activity\":\"…\",\"summary\":\"…\"}\n\n"
         "Text:\n"
         "\"\"\"{article}\"\"\""
     )
@@ -323,7 +343,7 @@ def llm_extract_structured(items: list, gemini_key: str,
         if all(k in data for k in ("company","technology","activity","summary")):
             rows.append([
                 data["company"], data["technology"], data["activity"], data["summary"],
-                it["link"], it.get("extracted_date") or today_iso()
+                it["link"], it["extracted_date"] or today_iso()
             ])
         else:
             errors.append({"url": it["link"], "raw": raw})
@@ -377,7 +397,7 @@ def run_pipeline():
         for q, company in queries:
             if len(seen) >= MAX_TOTAL_RESULTS:
                 break
-            for it in google_cse_search(q, cse_key, cse_cx, date_restrict_days=7):
+            for it in google_cse_search(q, cse_key, cse_cx):  # uses TIME_MODE/TIME_DAYS
                 link = it.get("link")
                 if link and link not in seen:
                     seen.add(link)
