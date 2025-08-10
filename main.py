@@ -22,47 +22,15 @@ TERM_GROUPS = [{
     "act": ["deployment", "implementation", "pilot", "rollout"]
 }]
 
-# Refined list (170)
-COMPANIES = [
-    "1&1 Drillisch", "2degrees", "4iG", "AIS", "Almadar Aljaded (Al Madar)", "Altibox",
-    "Altice", "Altice USA", "America Movil", "AT&T", "AXIAN Telecom", "Axiata", "Batelco",
-    "Bell Canada", "Bezeq", "Bharti Airtel", "BICS", "Bite Group", "Bouygues Telecom",
-    "BSNL", "BT", "Charter Communications", "China Broadnet", "China Mobile", "China Telecom",
-    "China Unicom", "Chunghwa Telecom", "altafiber (CBTS)", "Cirion Technologies",
-    "Citic Telecom CTC", "CK Hutchison", "COLT", "Comcast",
-    "Companhia de Telecomunicacoes de Macau (CTM)", "Cox Communications",
-    "Cyfrowy Polsat Group", "CYTA", "Deutsche Telekom", "Digital Nasional Berhad (DNB)",
-    "DISH Wireless", "Dito Telecommunity", "du", "e& (formerly Etisalat Group)", "Elisa",
-    "Entel", "Ethio Telecom", "FarEasTone", "Globe Telecom", "HKT", "Iliad", "Kazakhtelecom",
-    "KDDI", "KPN", "KT", "Lao Telecommunications Company (LTC)", "LG U+",
-    "Liberty Global", "Liberty Latin America", "Lumen Technologies (formerly CenturyLink)",
-    "Mafab Communications", "MASMOVIL", "Mauritius Telecom", "Maxis", "MegaFon", "MegaPath",
-    "Melita", "Millicom", "Mobile Communication Company of Iran (MCI)",
-    "Mobile TeleSystems (MTS)", "MTN", "ngena", "NOS", "NOW Telecom", "NTT Group",
-    "Omantel", "Ooredoo", "Orange", "Pakistan Telecommunication Co. Ltd (PTCL)", "PLDT",
-    "Polkomtel", "PPF Telecom Group", "Proximus (formerly Belgacom)", "Rain", "Rakuten Mobile",
-    "RCS&RDS", "Reliance Jio", "Retelit", "Rogers Communications", "Safaricom", "Sasktel",
-    "stc", "SES", "Sify Technologies", "Silknet", "Singtel", "SK Telecom", "SLT-Mobitel",
-    "SmarTone", "SoftBank", "Spark New Zealand", "Sprint", "StarHub", "Sunrise Communications",
-    "Swisscom", "Taiwan Mobile", "TalkTalk", "Tata Communications", "Tcell", "TDC", "Tele2",
-    "Telecom Argentina", "Telecom Egypt", "TIM", "Telefónica", "A1 Telekom Austria",
-    "Telekom Malaysia", "Telekom Slovenije", "Telekom Srbija", "Telenet", "Telenor", "Telia",
-    "Telkom (South Africa)", "Telkom Indonesia", "Telstra", "Telus", "TIME dotCom",
-    "TPG Telecom", "TPx Communications", "True Corp.", "Turk Telekom", "Turkcell", "Ucell",
-    "Unified National Networks (UNN)", "United Group", "Unitel", "US Cellular", "Uzbektelecom",
-    "Veon (formerly VimpelCom)", "Verizon", "Videotron", "Viettel", "Virgin Media O2",
-    "Vivacom", "Vocus Group", "Vodafone", "VodafoneZiggo", "Vonage", "Wind Tre", "Windstream",
-    "WOM", "Yettel", "YTL Communications", "Zain", "Zayo", "T-Mobile US", "Vodacom",
-    "Telkomsel", "XL Axiata", "Indosat Ooredoo Hutchison", "TIM Brasil",
-    "Vivo (Telefônica Brasil)", "Claro", "Mobily", "Airtel Africa", "Jazz",
-    "Grameenphone", "Robi Axiata"
-]
+# Refined list (100)
+COMPANIES = ["AIS", "Altice", "America Movil", "AT&T", "Axiata", "Bell Canada", "Bharti Airtel", "Bouygues Telecom", "BT", "Charter Communications", "China Mobile", "China Telecom", "China Unicom", "Chunghwa Telecom", "CK Hutchison", "Comcast", "Cox Communications", "CYTA", "Deutsche Telekom", "DISH Wireless", "du", "e&", "Elisa", "Entel", "Ethio Telecom", "Globe Telecom", "Iliad", "KDDI", "KPN", "KT", "LG Uplus", "Liberty Global",  "Lumen Technologies", "MASMOVIL", "Maxis", "Millicom", "MTS", "MTN", "NTT Docomo", "Omantel", "Ooredoo", "Orange", "PTCL", "PLDT",  "Proximus", "Rakuten Mobile",  "Reliance Jio", "Rogers Communications", "Safaricom", "stc", "Singtel", "SK Telecom", "SoftBank", "Spark New Zealand", "Sprint", "StarHub", "Sunrise Communications", "Swisscom", "Taiwan Mobile", "Tata Communications", "Tele2", "Telecom Argentina", "Telecom Egypt", "TIM", "Telefonica", "A1 Telekom Austria", "Telekom Malaysia", "Telenet", "Telenor", "Telia", "Telkom (South Africa)", "Telkom Indonesia", "Telstra", "Telus", "TPG Telecom", "Turkcell", "Veon", "Verizon", "Viettel", "Virgin Media O2", "Vodafone", "Wind Tre",  "Zain", "T-Mobile US", "Vodacom", "Telkomsel", "Indosat Ooredoo Hutchison", "TIM Brasil", "Vivo", "Claro", "Mobily", "Airtel Africa"]
+
 
 BINARY_EXTS = (".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx")
 DOC_EXTS = BINARY_EXTS
 
 MAX_RESULTS_PER_QUERY = 1
-MAX_TOTAL_RESULTS     = 170
+MAX_TOTAL_RESULTS     = 100
 MAX_FETCH             = 25
 CSE_TIMEOUT_SEC       = 30.0
 FETCH_TIMEOUT_SEC     = 20.0
