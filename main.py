@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple
 from urllib.parse import urlparse
+from string import Template
 
 import httpx
 import gspread
