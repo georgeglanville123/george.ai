@@ -482,7 +482,7 @@ def health():
 def run_pipeline():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
     step = request.args.get("step", "all").lower()
-    debug = request args.get("debug", "false").lower() == "true"  # ← fixed: read debug flag safely
+    debug = request.args.get("debug", "false").lower() == "true"  # ← fixed: read debug flag safely
     debug_payload = {}
 
     cse_key = os.getenv("CSE_API_KEY", "MISSING")
