@@ -4,15 +4,17 @@ import time
 import random
 import re
 import logging
+import socket
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple
-import gspread
-from google.oauth2.service_account import Credentials
+from urllib.parse import urlparse
+
 import httpx
+import gspread
 import trafilatura
 import google.generativeai as genai
 from flask import Flask, jsonify, request
-from urllib.parse import urlparse
+from google.oauth2.service_account import Credentials
 from google.auth import default as adc_default
 from zoneinfo import ZoneInfo
 
@@ -23,13 +25,29 @@ TERM_GROUPS = [{
 }]
 
 # Refined list (100)
-COMPANIES = ["AIS", "Altice", "America Movil", "AT&T", "Axiata", "Bell Canada", "Bharti Airtel", "Bouygues Telecom", "BT", "Charter Communications", "China Mobile", "China Telecom", "China Unicom", "Chunghwa Telecom", "CK Hutchison", "Comcast", "Cox Communications", "CYTA", "Deutsche Telekom", "DISH Wireless", "du", "e&", "Elisa", "Entel", "Ethio Telecom", "Globe Telecom", "Iliad", "KDDI", "KPN", "KT", "LG Uplus", "Liberty Global",  "Lumen Technologies", "MASMOVIL", "Maxis", "Millicom", "MTS", "MTN", "NTT Docomo", "Omantel", "Ooredoo", "Orange", "PTCL", "PLDT",  "Proximus", "Rakuten Mobile",  "Reliance Jio", "Rogers Communications", "Safaricom", "stc", "Singtel", "SK Telecom", "SoftBank", "Spark New Zealand", "Sprint", "StarHub", "Sunrise Communications", "Swisscom", "Taiwan Mobile", "Tata Communications", "Tele2", "Telecom Argentina", "Telecom Egypt", "TIM", "Telefonica", "A1 Telekom Austria", "Telekom Malaysia", "Telenet", "Telenor", "Telia", "Telkom (South Africa)", "Telkom Indonesia", "Telstra", "Telus", "TPG Telecom", "Turkcell", "Veon", "Verizon", "Viettel", "Virgin Media O2", "Vodafone", "Wind Tre",  "Zain", "T-Mobile US", "Vodacom", "Telkomsel", "Indosat Ooredoo Hutchison", "TIM Brasil", "Vivo", "Claro", "Mobily", "Airtel Africa"]
-
+COMPANIES = [
+    "AIS", "Altice", "America Movil", "AT&T", "Axiata", "Bell Canada", "Bharti Airtel",
+    "Bouygues Telecom", "BT", "Charter Communications", "China Mobile", "China Telecom",
+    "China Unicom", "Chunghwa Telecom", "CK Hutchison", "Comcast", "Cox Communications",
+    "CYTA", "Deutsche Telekom", "DISH Wireless", "du", "e&", "Elisa", "Entel",
+    "Ethio Telecom", "Globe Telecom", "Iliad", "KDDI", "KPN", "KT", "LG Uplus",
+    "Liberty Global", "Lumen Technologies", "MASMOVIL", "Maxis", "Millicom", "MTS", "MTN",
+    "NTT Docomo", "Omantel", "Ooredoo", "Orange", "PTCL", "PLDT", "Proximus",
+    "Rakuten Mobile", "Reliance Jio", "Rogers Communications", "Safaricom", "stc",
+    "Singtel", "SK Telecom", "SoftBank", "Spark New Zealand", "Sprint", "StarHub",
+    "Sunrise Communications", "Swisscom", "Taiwan Mobile", "Tata Communications", "Tele2",
+    "Telecom Argentina", "Telecom Egypt", "TIM", "Telefonica", "A1 Telekom Austria",
+    "Telekom Malaysia", "Telenet", "Telenor", "Telia", "Telkom (South Africa)",
+    "Telkom Indonesia", "Telstra", "Telus", "TPG Telecom", "Turkcell", "Veon", "Verizon",
+    "Viettel", "Virgin Media O2", "Vodafone", "Wind Tre", "Zain", "T-Mobile US", "Vodacom",
+    "Telkomsel", "Indosat Ooredoo Hutchison", "TIM Brasil", "Vivo", "Claro", "Mobily",
+    "Airtel Africa"
+]
 
 BINARY_EXTS = (".pdf", ".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx")
 DOC_EXTS = BINARY_EXTS
 
-MAX_RESULTS_PER_QUERY = 1
+MAX_RESULTS_PER_QUERY = 2      # was 1; modest increase for better recall
 MAX_TOTAL_RESULTS     = 100
 MAX_FETCH             = 25
 CSE_TIMEOUT_SEC       = 30.0
@@ -38,7 +56,7 @@ GEMINI_MODEL          = "gemini-1.5-flash"
 
 # Time filtering knobs
 TIME_MODE = os.getenv("TIME_MODE", "calendar")  # "calendar" or "rolling"
-TIME_DAYS = int(os.getenv("TIME_DAYS", "1"))    # N-day window
+TIME_DAYS = max(1, int(os.getenv("TIME_DAYS", "1")))  # guard against 0/negatives
 TIME_ZONE = "Europe/London"                     # used for calendar mode
 
 # CSE pacing
@@ -66,7 +84,10 @@ BAD_HINTS = (
     "q1","q2","q3","q4","whitepaper","webinar","rfp","tender",
     "brochure","datasheet"
 )
-PRESS_PATHS = ("/press", "/news", "/media", "/newsroom")
+PRESS_PATHS_SEGMENTS = {"press", "news", "media", "newsroom"}
+AGG_DOMAINS = {"news.google.com","news.yahoo.com","medium.com","substack.com","reddit.com"}
+
+FETCH_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; telco-genai-bot/1.0)"}
 
 # ────────────────────────── Helpers ──────────────────────────
 def tail(v: str) -> str:
@@ -75,18 +96,62 @@ def tail(v: str) -> str:
 def today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
-def safe_json_extract(text: str) -> dict:
-    try:
-        m = re.search(r'\{.*?\}', text, re.DOTALL)
-        return json.loads(m.group(0)) if m else {}
-    except Exception:
+def _extract_top_level_json(text: str) -> dict:
+    """
+    Robust-ish JSON object extractor:
+    1) strip code fences
+    2) try direct json.loads
+    3) scan for first balanced {...} block and parse it
+    """
+    if not text:
         return {}
+    s = text.strip()
+    s = re.sub(r'^```(?:json)?\s*', '', s, flags=re.I)
+    s = re.sub(r'\s*```$', '', s)
+
+    # Fast path
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    # Find the first balanced {...}
+    start = s.find('{')
+    while start != -1:
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == '{':
+                depth += 1
+            elif s[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = s[start:i+1]
+                    try:
+                        return json.loads(candidate)
+                    except Exception:
+                        break  # move start forward
+        start = s.find('{', start + 1)
+    return {}
 
 def _has_any(text: str, terms) -> bool:
+    """
+    Boundary matcher that works for tokens like 'AT&T', 'e&', and short names.
+    It treats boundaries as start/end or any non-alphanumeric char.
+    """
     if not text:
         return False
     t = text.lower()
-    return any(re.search(r"\b" + re.escape(term) + r"\b", t, re.I) for term in terms)
+    for term in terms:
+        if not term:
+            continue
+        pat = r'(?<![0-9a-z])' + re.escape(term.lower()) + r'(?![0-9a-z])'
+        if re.search(pat, t):
+            return True
+    return False
+
+def _is_probably_press_path(path: str) -> bool:
+    segments = {seg for seg in path.strip("/").split("/") if seg}
+    return len(segments & PRESS_PATHS_SEGMENTS) > 0
 
 def score_item(it: dict) -> int:
     title   = (it.get("title") or "")
@@ -94,26 +159,39 @@ def score_item(it: dict) -> int:
     url     = (it.get("link")  or "")
     company = (it.get("company") or "")
 
-    path = urlparse(url).path.lower()
-    host = urlparse(url).netloc.lower()
+    parsed = urlparse(url)
+    path = (parsed.path or "").lower()
+    host = (parsed.netloc or "").lower()
 
     score = 0
+    # Company match
     if _has_any(title, [company]):      score += 3
     elif _has_any(snippet, [company]):  score += 1
 
+    # AI/action hints
     if _has_any(title, AI_HINTS):       score += 3
     if _has_any(title, ACT_HINTS):      score += 3
     if _has_any(snippet, AI_HINTS):     score += 1
     if _has_any(snippet, ACT_HINTS):    score += 1
 
+    # Action verbs
     if _has_any(title, ACTION_VERBS):   score += 2
     if _has_any(snippet, ACTION_VERBS): score += 1
 
-    if any(p in path for p in PRESS_PATHS): score += 1
+    if _is_probably_press_path(path):   score += 1
 
+    # Domain-based tweaks
+    if host in AGG_DOMAINS:             score -= 2
+
+    # Company domain light boost (very fuzzy)
+    company_key = re.sub(r'[^a-z0-9]', '', company.lower())
+    host_key = re.sub(r'[^a-z0-9]', '', host.lower())
+    if company_key and company_key in host_key:
+        score += 1
+
+    # Demotions
     if path.endswith(DOC_EXTS):                      score -= 3
     if _has_any(title, BAD_HINTS) or _has_any(snippet, BAD_HINTS): score -= 3
-    if host in ("news.google.com","news.yahoo.com"): score -= 2
 
     return score
 
@@ -149,7 +227,7 @@ def google_cse_search(query: str, api_key: str, cx: str,
     if mode == "calendar":
         ldn = ZoneInfo(TIME_ZONE)
         today_ldn = datetime.now(ldn).date()
-        end = today_ldn - timedelta(days=1)
+        end = today_ldn - timedelta(days=1)               # exclude "today" for stability
         start = end - timedelta(days=days - 1)
         params["sort"] = f"date:r:{start:%Y%m%d}:{end:%Y%m%d}"
     else:
@@ -158,12 +236,12 @@ def google_cse_search(query: str, api_key: str, cx: str,
     delay = CSE_BASE_DELAY_SEC
     for attempt in range(1, CSE_MAX_RETRIES + 1):
         try:
-            with httpx.Client(timeout=CSE_TIMEOUT_SEC) as client:
+            with httpx.Client(timeout=CSE_TIMEOUT_SEC, headers=FETCH_HEADERS) as client:
                 resp = client.get("https://www.googleapis.com/customsearch/v1", params=params)
 
             if resp.status_code in (429, 503):
                 ra = resp.headers.get("retry-after")
-                wait = float(ra) if ra and ra.isdigit() else delay
+                wait = min(float(ra) if (ra and ra.isdigit()) else delay, 15.0)
                 logging.warning("CSE %s on attempt %d. Waiting %.2fs. URL=%s",
                                 resp.status_code, attempt, wait, resp.request.url)
                 time.sleep(wait)
@@ -185,28 +263,54 @@ def google_cse_search(query: str, api_key: str, cx: str,
         except httpx.HTTPStatusError as e:
             logging.error("CSE HTTP error on attempt %d: %s", attempt, e)
             time.sleep(delay)
-            delay *= CSE_BACKOFF_FACTOR
+            delay = min(delay * CSE_BACKOFF_FACTOR, 15.0)
         except Exception as e:
             logging.error("CSE transport error on attempt %d: %s", attempt, e)
             time.sleep(delay)
-            delay *= CSE_BACKOFF_FACTOR
+            delay = min(delay * CSE_BACKOFF_FACTOR, 15.0)
 
     logging.error("CSE failed after %d attempts for query: %s", CSE_MAX_RETRIES, query)
     return []
 
 # ───────────────────── Fetch & Extract ─────────────────────
+def _is_safe_public_http_url(url: str) -> bool:
+    """
+    Basic SSRF guard: allow only http/https, block localhost and 127.0.0.1/::1.
+    (We avoid DNS/IP blocking for simplicity.)
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    return True
+
 def fetch_and_extract(url: str, client: httpx.Client,
                       timeout: float = FETCH_TIMEOUT_SEC) -> dict:
-    if url.lower().endswith(BINARY_EXTS):
+    parsed = urlparse(url)
+    path_lower = (parsed.path or '').lower()
+
+    # Skip obvious binaries by extension (works even with querystrings)
+    if path_lower.endswith(DOC_EXTS):
         return {"url": url, "text": None, "title": None, "date": None, "error": "skipped_binary"}
 
+    if not _is_safe_public_http_url(url):
+        return {"url": url, "text": None, "title": None, "date": None, "error": "unsafe_url"}
+
     try:
-        r = client.get(url, timeout=timeout, follow_redirects=True)
+        r = client.get(url, timeout=timeout, follow_redirects=True, headers=FETCH_HEADERS)
         r.raise_for_status()
     except Exception as e:
         return {"url": url, "text": None, "title": None, "date": None, "error": f"HTTP:{e}"}
 
     ctype = (r.headers.get("content-type") or "").lower()
+    # If server returns a binary content-type, skip
+    if any(bin_ct in ctype for bin_ct in ("application/pdf", "application/msword",
+                                          "application/vnd.openxmlformats", "application/vnd.ms-excel",
+                                          "application/vnd.ms-powerpoint")):
+        return {"url": url, "text": None, "title": None, "date": None, "error": f"binary_content:{ctype}"}
+
     if "text/html" not in ctype and "application/xhtml" not in ctype:
         return {"url": url, "text": None, "title": None, "date": None, "error": f"non_html:{ctype}"}
 
@@ -237,7 +341,7 @@ def gemini_generate_with_backoff(model, prompt: str, config: dict, max_tries: in
         except Exception as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             if (status == 503 or "503" in str(e)) and attempt < max_tries:
-                wait = (2**attempt) + random.random()
+                wait = min((2 ** attempt) + random.random(), 15.0)
                 logging.warning("503 from Gemini, retry %d/%d after %.1fs", attempt, max_tries, wait)
                 time.sleep(wait)
                 continue
@@ -253,7 +357,7 @@ def llm_relevance_filter(items: list, gemini_key: str,
         "You are a strict filter for news about telecom operators (CSPs) "
         "using generative AI (GenAI/LLMs) for deployments, pilots, rollouts, or implementations.\n\n"
         "Return ONLY valid JSON in this exact shape:\n"
-        "{{\"relevant\": true/false, \"reason\": \"<≤20 words>\"}}\n\n"
+        "{\"relevant\": true/false, \"reason\": \"<<=20 words>\"}\n\n"
         "Text to review (truncated):\n"
         "\"\"\"{article}\"\"\""
     )
@@ -277,7 +381,7 @@ def llm_relevance_filter(items: list, gemini_key: str,
             continue
 
         raw = getattr(resp, "text", "").strip()
-        data = safe_json_extract(raw)
+        data = _extract_top_level_json(raw)
         if isinstance(data, dict) and data.get("relevant") is True:
             it["relevance_reason"] = data.get("reason", "")
             relevant.append(it)
@@ -285,7 +389,7 @@ def llm_relevance_filter(items: list, gemini_key: str,
             reason = data.get("reason", "not relevant") if isinstance(data, dict) else "bad JSON"
             irrelevant.append({"url": it["link"], "reason": reason})
 
-        time.sleep(0.3 + random.random()*0.2)
+        time.sleep(0.3 + random.random() * 0.2)
 
     return relevant, irrelevant, errors
 
@@ -303,7 +407,7 @@ def llm_extract_structured(items: list, gemini_key: str,
         "- activity: deployment, pilot, rollout, etc.\n"
         "- summary: <=40 words\n\n"
         "Return ONLY valid JSON in this exact shape:\n"
-        "{{\"company\":\"…\",\"technology\":\"…\",\"activity\":\"…\",\"summary\":\"…\"}}\n\n"
+        "{\"company\":\"…\",\"technology\":\"…\",\"activity\":\"…\",\"summary\":\"…\"}\n\n"
         "Text:\n"
         "\"\"\"{article}\"\"\""
     )
@@ -323,7 +427,7 @@ def llm_extract_structured(items: list, gemini_key: str,
             continue
 
         raw = getattr(resp, "text", "").strip()
-        data = safe_json_extract(raw)
+        data = _extract_top_level_json(raw)
         if isinstance(data, dict) and all(k in data for k in ("company","technology","activity","summary")):
             rows.append([
                 data["company"], data["technology"], data["activity"], data["summary"],
@@ -332,7 +436,7 @@ def llm_extract_structured(items: list, gemini_key: str,
         else:
             errors.append({"url": it["link"], "raw": raw})
 
-        time.sleep(0.3 + random.random()*0.2)
+        time.sleep(0.3 + random.random() * 0.2)
 
     return rows, errors
 
@@ -350,6 +454,19 @@ gs_client = gspread.authorize(creds)
 SPREADSHEET_ID = "1YRIXgBdft3PaJJrOLVjWudPTUXk8jfljNq7EkWtGtCY"
 WORKSHEET_NAME = "NewsData"
 
+def _get_existing_urls(limit_rows: int = 500) -> set:
+    """Fetch last ~limit_rows URLs to avoid duplicates across runs."""
+    try:
+        sheet = gs_client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
+        # Assumes columns: company, tech, activity, summary, url, date
+        values = sheet.get_all_values()
+        last = values[-limit_rows:] if len(values) > limit_rows else values
+        urls = {row[4] for row in last if len(row) >= 5 and row[4]}
+        return urls
+    except Exception as e:
+        logging.warning("Could not fetch existing URLs: %s", e)
+        return set()
+
 def append_to_sheet(rows: list):
     """rows: list of [company, tech, activity, summary, url, date]"""
     sheet = gs_client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
@@ -365,7 +482,7 @@ def health():
 def run_pipeline():
     dry_run = request.args.get("dry_run", "false").lower() == "true"
     step = request.args.get("step", "all").lower()
-    debug = request.args.get("debug", "false").lower() == "true"
+    debug = request args.get("debug", "false").lower() == "true"  # ← fixed: read debug flag safely
     debug_payload = {}
 
     cse_key = os.getenv("CSE_API_KEY", "MISSING")
@@ -381,7 +498,8 @@ def run_pipeline():
         for q, company in random.sample(queries, k=len(queries)):  # randomize to spread throttle
             if len(seen) >= MAX_TOTAL_RESULTS:
                 break
-            for it in google_cse_search(q, cse_key, cse_cx):
+            items = google_cse_search(q, cse_key, cse_cx)
+            for it in items:
                 link = it.get("link")
                 if link and link not in seen:
                     seen.add(link)
@@ -391,7 +509,7 @@ def run_pipeline():
                         "snippet": it.get("snippet", ""),
                         "company": company
                     })
-            time.sleep(CSE_BASE_DELAY_SEC + random.random()*0.3)
+            time.sleep(CSE_BASE_DELAY_SEC + random.random() * 0.3)
 
     if debug:
         debug_payload["all_results"] = [
@@ -402,7 +520,7 @@ def run_pipeline():
     # 1.5) Rank and pick the best to fetch
     ranked = sorted(
         all_results,
-        key=lambda it: (score_item(it), len(it.get("title", ""))),
+        key=lambda it: (score_item(it), min(len(it.get("title", "")), 120)),
         reverse=True
     )
     candidates = cap_by_domain(ranked, per_domain=2)[:MAX_FETCH]
@@ -413,19 +531,18 @@ def run_pipeline():
     # 2) Fetch
     fetched, fetch_errors = [], []
     if step in ("all", "fetch", "llm", "extract") and not dry_run:
-        client = httpx.Client(timeout=FETCH_TIMEOUT_SEC)
-        for it in candidates:
-            res = fetch_and_extract(it["link"], client)
-            if res["error"]:
-                fetch_errors.append(res)
-            else:
-                it.update({
-                    "extracted_text": res["text"],
-                    "extracted_title": res["title"],
-                    "extracted_date": res["date"],
-                })
-                fetched.append(it)
-        client.close()
+        with httpx.Client(timeout=FETCH_TIMEOUT_SEC, headers=FETCH_HEADERS) as client:
+            for it in candidates:
+                res = fetch_and_extract(it["link"], client)
+                if res["error"]:
+                    fetch_errors.append(res)
+                else:
+                    it.update({
+                        "extracted_text": res["text"],
+                        "extracted_title": res["title"],
+                        "extracted_date": res["date"],
+                    })
+                    fetched.append(it)
 
     if debug:
         debug_payload["fetched_urls"] = [it["link"] for it in fetched]
@@ -450,15 +567,19 @@ def run_pipeline():
     if debug:
         debug_payload["structured_preview"] = structured
 
-    # 5) Append to Google Sheet
+    # 5) Append to Google Sheet (dedupe across recent rows)
+    written = 0
     if structured:
-        logging.info(
-            "Writing %d row(s) to Sheets. URLs: %s",
-            len(structured),
-            [row[4] for row in structured]
-        )
         try:
-            append_to_sheet(structured)
+            existing = _get_existing_urls(limit_rows=500)
+            to_write = [row for row in structured if row[4] not in existing]
+            if to_write:
+                logging.info("Writing %d new row(s) to Sheets. URLs: %s",
+                             len(to_write), [row[4] for row in to_write])
+                append_to_sheet(to_write)
+                written = len(to_write)
+            else:
+                logging.info("All extracted URLs already present in the sheet.")
         except Exception as e:
             logging.exception("Failed to write to Google Sheet: %s", e)
 
@@ -477,14 +598,16 @@ def run_pipeline():
         "relevance_errors": len(rel_errors),
         "extract_rows": len(structured),
         "extract_errors": len(ext_errors),
-        "secrets_tail": {
+        "written": written,
+        "search_window": {"mode": TIME_MODE, "days": TIME_DAYS, "tz": TIME_ZONE},
+    }
+    if debug:
+        resp["debug"] = debug_payload
+        resp["secrets_tail"] = {
             "cse_key": tail(cse_key),
             "cse_cx": tail(cse_cx),
             "gemini": tail(gemini_key)
         }
-    }
-    if debug:
-        resp["debug"] = debug_payload
 
     return jsonify(resp), 200
 
