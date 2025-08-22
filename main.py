@@ -431,13 +431,14 @@ def llm_relevance_filter(items: list, gemini_key: str,
     genai.configure(api_key=gemini_key)
     model = genai.GenerativeModel(model_name)
 
-    prompt_template = (
+
+    prompt_template = Template(
         "You are a strict filter for news about telecom operators (CSPs) "
         "using generative AI (GenAI/LLMs) for deployments, pilots, rollouts, or implementations.\n\n"
         "Return ONLY valid JSON in this exact shape:\n"
         "{\"relevant\": true/false, \"reason\": \"<=20 words\"}\n\n"
         "Text to review (truncated):\n"
-        "\"\"\"{article}\"\"\""
+        "\"\"\"$article\"\"\""
     )
 
     relevant, irrelevant, errors = [], [], []
@@ -449,7 +450,7 @@ def llm_relevance_filter(items: list, gemini_key: str,
             irrelevant.append({"url": it["link"], "reason": "no text"})
             continue
 
-        prompt = prompt_template.format(article=text[:3000])
+        prompt = prompt_template.substitute(article=text[:3000])
         try:
             resp = gemini_generate_with_backoff(
                 model, prompt, {"temperature": 0, "max_output_tokens": 60}
@@ -478,7 +479,7 @@ def llm_extract_structured(items: list, gemini_key: str,
     genai.configure(api_key=gemini_key)
     model = genai.GenerativeModel(model_name)
 
-    prompt_schema = (
+    prompt_schema = Template(
         "Extract these fields from the article text:\n"
         "- company: primary telecom operator or vendor\n"
         "- technology: GenAI/LLM used\n"
@@ -487,7 +488,7 @@ def llm_extract_structured(items: list, gemini_key: str,
         "Return ONLY valid JSON in this exact shape:\n"
         "{\"company\":\"…\",\"technology\":\"…\",\"activity\":\"…\",\"summary\":\"…\"}\n\n"
         "Text:\n"
-        "\"\"\"{article}\"\"\""
+        "\"\"\"$article\"\"\""
     )
 
     rows, errors = [], []
@@ -495,7 +496,7 @@ def llm_extract_structured(items: list, gemini_key: str,
 
     for it in items:
         snippet = (it.get("extracted_text") or "")[:3500]
-        prompt = prompt_schema.format(article=snippet)
+        prompt = prompt_schema.substitute(article=snippet)
         try:
             resp = gemini_generate_with_backoff(
                 model, prompt, {"temperature": 0, "max_output_tokens": 120}
